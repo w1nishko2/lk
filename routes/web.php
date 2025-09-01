@@ -2,9 +2,10 @@
 
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\URL;
 use App\Http\Controllers\SiteBuilderController;
 use App\Http\Controllers\BlockController;
-use App\Http\Controllers\EmailCampaignController;
+use App\Http\Controllers\MassEmailController;
 
 /*
 |--------------------------------------------------------------------------
@@ -40,13 +41,19 @@ Route::resource('blocks', BlockController::class)->middleware('auth');
 Route::get('/blocks/{block}/preview', [BlockController::class, 'preview'])->name('blocks.preview')->middleware('auth');
 Route::get('/blocks/{block}/mini-preview', [BlockController::class, 'miniPreview'])->name('blocks.mini-preview')->middleware('auth');
 
-// Маршруты email рассылок (только для авторизованных пользователей)
-Route::middleware('auth')->group(function () {
-    Route::resource('email-campaigns', EmailCampaignController::class);
-    Route::post('/email-campaigns/{emailCampaign}/start', [EmailCampaignController::class, 'start'])->name('email-campaigns.start');
-    Route::post('/email-campaigns/{emailCampaign}/pause', [EmailCampaignController::class, 'pause'])->name('email-campaigns.pause');
+// Маршруты массовой рассылки (только для авторизованных пользователей)
+Route::prefix('mass-email')->name('mass-email.')->middleware('auth')->group(function () {
+    Route::get('/', [MassEmailController::class, 'index'])->name('index');
+    Route::post('/import', [MassEmailController::class, 'importEmails'])->name('import');
+    Route::post('/send-batch', [MassEmailController::class, 'sendBatch'])->name('send-batch');
+    Route::get('/stats', [MassEmailController::class, 'getStats'])->name('stats');
+    Route::post('/reset-failed', [MassEmailController::class, 'resetFailed'])->name('reset-failed');
+    Route::post('/clear', [MassEmailController::class, 'clearQueue'])->name('clear');
+    Route::get('/template', [MassEmailController::class, 'previewTemplate'])->name('template');
 });
 
 Auth::routes();
-
+if (app()->environment('production')) {
+    URL::forceScheme('https');
+}
 Route::get('/home', [App\Http\Controllers\HomeController::class, 'index'])->name('home');

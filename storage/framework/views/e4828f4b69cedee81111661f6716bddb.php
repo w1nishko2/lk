@@ -1,0 +1,1 @@
+<?php /**PATH C:\OSPanel\domains\konstructor\resources\views\components\blocks-modal.blade.php ENDPATH**/ ?>
