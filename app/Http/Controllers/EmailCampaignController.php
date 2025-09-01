@@ -4,7 +4,7 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
-use App\Jobs\SendCampaignEmail;
+use App\Jobs\SendCampaignEmailLegacy;
 
 class EmailCampaignController extends Controller
 {
@@ -119,7 +119,7 @@ class EmailCampaignController extends Controller
 
         foreach ($chunks as $i => $chunk) {
             $delaySeconds = $i * 5;
-            SendCampaignEmail::dispatch($chunk, $subject, $previewText)
+            SendCampaignEmailLegacy::dispatch($chunk, $subject, $previewText)
                 ->delay(now()->addSeconds($delaySeconds));
         }
 
