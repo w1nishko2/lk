@@ -2,7 +2,6 @@
 
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\URL;
 use App\Http\Controllers\SiteBuilderController;
 use App\Http\Controllers\BlockController;
 use App\Http\Controllers\EmailCampaignController;
@@ -42,18 +41,12 @@ Route::get('/blocks/{block}/preview', [BlockController::class, 'preview'])->name
 Route::get('/blocks/{block}/mini-preview', [BlockController::class, 'miniPreview'])->name('blocks.mini-preview')->middleware('auth');
 
 // Маршруты email рассылок (только для авторизованных пользователей)
-Route::prefix('email-campaigns')->name('email-campaigns.')->middleware('auth')->group(function () {
-    Route::get('/', [EmailCampaignController::class, 'index'])->name('index');
-    Route::get('/create', [EmailCampaignController::class, 'create'])->name('create');
-    Route::post('/', [EmailCampaignController::class, 'store'])->name('store');
-    Route::get('/{emailCampaign}', [EmailCampaignController::class, 'show'])->name('show');
-    Route::post('/{emailCampaign}/start', [EmailCampaignController::class, 'start'])->name('start');
-    Route::post('/{emailCampaign}/pause', [EmailCampaignController::class, 'pause'])->name('pause');
-    Route::get('/{emailCampaign}/preview', [EmailCampaignController::class, 'preview'])->name('preview');
+Route::middleware('auth')->group(function () {
+    Route::resource('email-campaigns', EmailCampaignController::class);
+    Route::post('/email-campaigns/{emailCampaign}/start', [EmailCampaignController::class, 'start'])->name('email-campaigns.start');
+    Route::post('/email-campaigns/{emailCampaign}/pause', [EmailCampaignController::class, 'pause'])->name('email-campaigns.pause');
 });
 
 Auth::routes();
-if (app()->environment('production')) {
-    URL::forceScheme('https');
-}
+
 Route::get('/home', [App\Http\Controllers\HomeController::class, 'index'])->name('home');

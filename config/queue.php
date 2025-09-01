@@ -41,6 +41,23 @@ return [
             'retry_after' => 90,
             'after_commit' => false,
         ],
+        
+        // Специализированные очереди для email рассылок
+        'bulk-email' => [
+            'driver' => 'database',
+            'table' => 'jobs',
+            'queue' => 'bulk-email',
+            'retry_after' => 3600, // 1 час для больших рассылок
+            'after_commit' => false,
+        ],
+        
+        'medium-email' => [
+            'driver' => 'database',
+            'table' => 'jobs',
+            'queue' => 'medium-email',
+            'retry_after' => 1800, // 30 минут
+            'after_commit' => false,
+        ],
 
         'beanstalkd' => [
             'driver' => 'beanstalkd',

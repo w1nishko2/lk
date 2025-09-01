@@ -4,7 +4,6 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class EmailCampaign extends Model
 {
@@ -16,64 +15,52 @@ class EmailCampaign extends Model
         'content',
         'template',
         'status',
-        'total_recipients',
+        'scheduled_at',
+        'sent_at',
+        'recipients_count',
         'sent_count',
         'failed_count',
-        'delay_seconds',
-        'scheduled_at',
-        'started_at',
-        'completed_at',
-        'settings'
+        'batch_size',
+        'delay_between_batches',
+        'emails_per_minute',
+        'next_batch_at',
+        'current_batch',
+        'total_batches',
+        'user_id'
     ];
 
     protected $casts = [
-        'settings' => 'array',
         'scheduled_at' => 'datetime',
-        'started_at' => 'datetime',
-        'completed_at' => 'datetime'
+        'sent_at' => 'datetime',
+        'next_batch_at' => 'datetime',
     ];
 
-    public function recipients(): HasMany
+    public function user()
     {
-        return $this->hasMany(EmailRecipient::class, 'campaign_id');
+        return $this->belongsTo(User::class);
     }
 
-    public function pendingRecipients(): HasMany
+    public function logs()
     {
-        return $this->recipients()->where('status', 'pending');
+        return $this->hasMany(EmailLog::class, 'campaign_id');
     }
 
-    public function sentRecipients(): HasMany
+    public function scopeActive($query)
     {
-        return $this->recipients()->where('status', 'sent');
+        return $query->where('status', 'active');
     }
 
-    public function failedRecipients(): HasMany
+    public function scopeCompleted($query)
     {
-        return $this->recipients()->where('status', 'failed');
+        return $query->where('status', 'completed');
     }
 
-    public function getProgressPercentageAttribute(): float
+    public function getSuccessRateAttribute()
     {
-        if ($this->total_recipients === 0) {
+        if ($this->sent_count == 0) {
             return 0;
         }
         
-        return round(($this->sent_count / $this->total_recipients) * 100, 2);
-    }
-
-    public function isCompleted(): bool
-    {
-        return $this->status === 'completed';
-    }
-
-    public function isSending(): bool
-    {
-        return $this->status === 'sending';
-    }
-
-    public function canStart(): bool
-    {
-        return in_array($this->status, ['draft', 'paused']) && $this->total_recipients > 0;
+        return round(($this->sent_count - $this->failed_count) / $this->sent_count * 100, 2);
     }
 }

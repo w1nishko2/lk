@@ -2,167 +2,295 @@
 
 namespace App\Http\Controllers;
 
-use Illuminate\Http\Request;
-use Illuminate\Http\JsonResponse;
-use Illuminate\View\View;
-use Illuminate\Http\RedirectResponse;
 use App\Models\EmailCampaign;
-use App\Models\EmailRecipient;
-use App\Services\EmailService;
+use App\Models\EmailTemplate;
+use App\Models\EmailLog;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Log;
+use App\Mail\CampaignEmail;
+use Illuminate\Support\Facades\Queue;
+use App\Jobs\SendEmailCampaign;
 
 class EmailCampaignController extends Controller
 {
-    protected EmailService $emailService;
-
-    public function __construct(EmailService $emailService)
+    public function index()
     {
-        $this->emailService = $emailService;
+        $campaigns = EmailCampaign::where('user_id', Auth::id())
+            ->orderBy('created_at', 'desc')
+            ->paginate(10);
+            
+        return view('email.campaigns.index', compact('campaigns'));
     }
 
-    public function index(): View
+    public function create()
     {
-        $campaigns = EmailCampaign::orderBy('created_at', 'desc')->paginate(10);
-        
-        return view('email-campaigns.index', compact('campaigns'));
+        $templates = EmailTemplate::where('user_id', Auth::id())
+            ->where('is_active', true)
+            ->get();
+            
+        return view('email.campaigns.create', compact('templates'));
     }
 
-    public function create(): View
+    public function store(Request $request)
     {
-        $templates = $this->getEmailTemplates();
-        
-        return view('email-campaigns.create', compact('templates'));
-    }
-
-    public function store(Request $request): RedirectResponse
-    {
-        $validator = Validator::make($request->all(), [
+        $validated = $request->validate([
             'name' => 'required|string|max:255',
             'subject' => 'required|string|max:255',
             'content' => 'required|string',
-            'template' => 'required|string',
-            'delay_seconds' => 'required|integer|min:10|max:3600',
-            'recipients_file' => 'required|file|mimes:txt|max:10240'
+            'template_id' => 'nullable|exists:email_templates,id',
+            'scheduled_at' => 'nullable|date|after:now',
+            'email_list' => 'required|file|mimes:txt,csv',
+            'batch_size' => 'nullable|integer|min:1|max:1000',
+            'delay_between_batches' => 'nullable|integer|min:30|max:3600',
+            'emails_per_minute' => 'nullable|integer|min:1|max:60'
         ]);
 
-        if ($validator->fails()) {
-            return back()->withErrors($validator)->withInput();
-        }
+        // Загрузка списка email адресов
+        $emailFile = $request->file('email_list');
+        $emails = $this->parseEmailFile($emailFile);
+        
+        $emailCount = count($emails);
+        
+        // Автоматическая настройка параметров в зависимости от размера базы
+        $batchSettings = $this->calculateOptimalBatchSettings($emailCount, $validated);
 
         $campaign = EmailCampaign::create([
-            'name' => $request->name,
-            'subject' => $request->subject,
-            'content' => $request->content,
-            'template' => $request->template,
-            'delay_seconds' => $request->delay_seconds,
-            'settings' => [
-                'from_name' => $request->from_name ?? 'Конструктор Сайтов',
-                'from_email' => 'email@weebs.ru'
-            ]
+            'name' => $validated['name'],
+            'subject' => $validated['subject'],
+            'content' => $validated['content'],
+            'template' => $validated['template_id'] ?? null,
+            'scheduled_at' => $validated['scheduled_at'] ?? null,
+            'recipients_count' => $emailCount,
+            'batch_size' => $batchSettings['batch_size'],
+            'delay_between_batches' => $batchSettings['delay_between_batches'],
+            'emails_per_minute' => $batchSettings['emails_per_minute'],
+            'user_id' => Auth::id()
         ]);
 
-        // Обработка файла с получателями
-        $this->processRecipientsFile($campaign, $request->file('recipients_file'));
+        // Создание логов для каждого email пакетами для больших списков
+        $this->createEmailLogs($campaign, $emails);
 
-        return redirect()->route('email-campaigns.show', $campaign)
-                        ->with('success', 'Кампания создана успешно');
+        if ($validated['scheduled_at']) {
+            // Запланированная рассылка
+            $campaign->update(['status' => 'scheduled']);
+        } else {
+            // Немедленная рассылка
+            $this->startCampaign($campaign);
+        }
+
+        return redirect()->route('email-campaigns.index')
+            ->with('success', "Кампания создана успешно! Настроена для отправки {$emailCount} писем пакетами по {$batchSettings['batch_size']} с интервалом {$batchSettings['delay_between_batches']} сек.");
     }
 
-    public function show(EmailCampaign $emailCampaign): View
+    /**
+     * Рассчитывает оптимальные настройки пакетной отправки
+     */
+    private function calculateOptimalBatchSettings(int $emailCount, array $validated): array
     {
-        $emailCampaign->load(['recipients' => function ($query) {
-            $query->orderBy('created_at', 'desc');
-        }]);
+        // Базовые настройки в зависимости от размера базы
+        if ($emailCount > 100000) {
+            // Очень большая база (100k+)
+            $defaults = [
+                'batch_size' => 50,
+                'delay_between_batches' => 300, // 5 минут
+                'emails_per_minute' => 5
+            ];
+        } elseif ($emailCount > 50000) {
+            // Большая база (50k+)
+            $defaults = [
+                'batch_size' => 100,
+                'delay_between_batches' => 180, // 3 минуты
+                'emails_per_minute' => 8
+            ];
+        } elseif ($emailCount > 10000) {
+            // Средняя база (10k+)
+            $defaults = [
+                'batch_size' => 200,
+                'delay_between_batches' => 120, // 2 минуты
+                'emails_per_minute' => 10
+            ];
+        } elseif ($emailCount > 1000) {
+            // Малая база (1k+)
+            $defaults = [
+                'batch_size' => 300,
+                'delay_between_batches' => 60, // 1 минута
+                'emails_per_minute' => 15
+            ];
+        } else {
+            // Очень малая база
+            $defaults = [
+                'batch_size' => 500,
+                'delay_between_batches' => 30, // 30 секунд
+                'emails_per_minute' => 20
+            ];
+        }
+        
+        // Переопределяем настройки пользователя, если они заданы
+        return [
+            'batch_size' => $validated['batch_size'] ?? $defaults['batch_size'],
+            'delay_between_batches' => $validated['delay_between_batches'] ?? $defaults['delay_between_batches'],
+            'emails_per_minute' => $validated['emails_per_minute'] ?? $defaults['emails_per_minute']
+        ];
+    }
+    
+    /**
+     * Создает записи email логов пакетами для оптимизации
+     */
+    private function createEmailLogs(EmailCampaign $campaign, array $emails): void
+    {
+        $emailLogs = [];
+        $batchSize = 1000; // Пакеты для вставки в БД
+        
+        foreach ($emails as $index => $email) {
+            $emailLogs[] = [
+                'campaign_id' => $campaign->id,
+                'email' => trim($email),
+                'status' => 'pending',
+                'created_at' => now(),
+                'updated_at' => now()
+            ];
+            
+            // Вставляем пакетами для оптимизации
+            if (count($emailLogs) >= $batchSize || $index === count($emails) - 1) {
+                EmailLog::insert($emailLogs);
+                $emailLogs = [];
+            }
+        }
+    }
 
+    public function show(EmailCampaign $emailCampaign)
+    {
+        $this->authorize('view', $emailCampaign);
+        
         $stats = [
-            'total' => $emailCampaign->total_recipients,
+            'total' => $emailCampaign->recipients_count,
             'sent' => $emailCampaign->sent_count,
             'failed' => $emailCampaign->failed_count,
-            'pending' => $emailCampaign->total_recipients - $emailCampaign->sent_count - $emailCampaign->failed_count
+            'pending' => $emailCampaign->recipients_count - $emailCampaign->sent_count - $emailCampaign->failed_count,
+            'success_rate' => $emailCampaign->success_rate
         ];
-
-        return view('email-campaigns.show', compact('emailCampaign', 'stats'));
-    }
-
-    public function start(EmailCampaign $emailCampaign): JsonResponse
-    {
-        if (!$emailCampaign->canStart()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Кампания не может быть запущена'
-            ]);
-        }
-
-        $emailCampaign->update([
-            'status' => 'sending',
-            'started_at' => now()
-        ]);
-
-        // Запуск в фоне
-        $this->emailService->startCampaign($emailCampaign);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Рассылка запущена'
-        ]);
-    }
-
-    public function pause(EmailCampaign $emailCampaign): JsonResponse
-    {
-        $emailCampaign->update(['status' => 'paused']);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Рассылка приостановлена'
-        ]);
-    }
-
-    public function preview(EmailCampaign $emailCampaign): View
-    {
-        $content = $this->emailService->renderEmail($emailCampaign, [
-            'name' => 'Имя Получателя',
-            'email' => 'example@example.com'
-        ]);
-
-        return view('email-campaigns.preview', compact('emailCampaign', 'content'));
-    }
-
-    private function processRecipientsFile(EmailCampaign $campaign, $file): void
-    {
-        $content = file_get_contents($file->getRealPath());
-        $emails = array_filter(array_map('trim', explode("\n", $content)));
         
-        $validEmails = [];
-        foreach ($emails as $email) {
-            if (filter_var($email, FILTER_VALIDATE_EMAIL)) {
-                $validEmails[] = [
-                    'campaign_id' => $campaign->id,
-                    'email' => $email,
-                    'created_at' => now(),
-                    'updated_at' => now()
-                ];
-            }
-        }
-
-        if (!empty($validEmails)) {
-            // Разбиваем на чанки для избежания превышения лимитов памяти
-            $chunks = array_chunk($validEmails, 1000);
-            foreach ($chunks as $chunk) {
-                EmailRecipient::insert($chunk);
-            }
-            
-            $campaign->update(['total_recipients' => count($validEmails)]);
-        }
+        $logs = $emailCampaign->logs()->orderBy('created_at', 'desc')->paginate(20);
+        
+        return view('email.campaigns.show', compact('emailCampaign', 'stats', 'logs'));
     }
 
-    private function getEmailTemplates(): array
+    public function edit(EmailCampaign $emailCampaign)
     {
-        return [
-            'sales' => 'Продающий шаблон',
-            'informational' => 'Информационный шаблон',
-            'promotional' => 'Рекламный шаблон'
-        ];
+        $this->authorize('update', $emailCampaign);
+        
+        if ($emailCampaign->status !== 'draft') {
+            return redirect()->back()->with('error', 'Можно редактировать только черновики');
+        }
+        
+        $templates = EmailTemplate::where('user_id', Auth::id())
+            ->where('is_active', true)
+            ->get();
+            
+        return view('email.campaigns.edit', compact('emailCampaign', 'templates'));
+    }
+
+    public function update(Request $request, EmailCampaign $emailCampaign)
+    {
+        $this->authorize('update', $emailCampaign);
+        
+        if ($emailCampaign->status !== 'draft') {
+            return redirect()->back()->with('error', 'Можно редактировать только черновики');
+        }
+
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'subject' => 'required|string|max:255',
+            'content' => 'required|string',
+            'template_id' => 'nullable|exists:email_templates,id',
+            'scheduled_at' => 'nullable|date|after:now'
+        ]);
+
+        $emailCampaign->update($validated);
+
+        return redirect()->route('email-campaigns.index')
+            ->with('success', 'Кампания обновлена успешно!');
+    }
+
+    public function destroy(EmailCampaign $emailCampaign)
+    {
+        $this->authorize('delete', $emailCampaign);
+        
+        if ($emailCampaign->status === 'active') {
+            return redirect()->back()->with('error', 'Нельзя удалить активную кампанию');
+        }
+        
+        $emailCampaign->delete();
+        
+        return redirect()->route('email-campaigns.index')
+            ->with('success', 'Кампания удалена успешно!');
+    }
+
+    public function start(EmailCampaign $emailCampaign)
+    {
+        $this->authorize('update', $emailCampaign);
+        
+        if ($emailCampaign->status !== 'draft' && $emailCampaign->status !== 'paused') {
+            return redirect()->back()->with('error', 'Можно запускать только черновики или приостановленные кампании');
+        }
+        
+        $this->startCampaign($emailCampaign);
+        
+        return redirect()->back()->with('success', 'Рассылка запущена!');
+    }
+
+    public function pause(EmailCampaign $emailCampaign)
+    {
+        $this->authorize('update', $emailCampaign);
+        
+        if ($emailCampaign->status !== 'active') {
+            return redirect()->back()->with('error', 'Можно приостановить только активные кампании');
+        }
+        
+        $emailCampaign->update(['status' => 'paused']);
+        
+        return redirect()->back()->with('success', 'Рассылка приостановлена!');
+    }
+
+    private function parseEmailFile($file)
+    {
+        $content = file_get_contents($file->getPathname());
+        $emails = [];
+        
+        // Определяем тип файла и парсим соответственно
+        if ($file->getClientOriginalExtension() === 'csv') {
+            $lines = str_getcsv($content, "\n");
+            foreach ($lines as $line) {
+                $data = str_getcsv($line);
+                if (filter_var($data[0], FILTER_VALIDATE_EMAIL)) {
+                    $emails[] = $data[0];
+                }
+            }
+        } else {
+            // Для txt файлов
+            $lines = explode("\n", $content);
+            foreach ($lines as $line) {
+                $email = trim($line);
+                if (filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                    $emails[] = $email;
+                }
+            }
+        }
+        
+        return array_unique($emails);
+    }
+
+    private function startCampaign(EmailCampaign $campaign)
+    {
+        $campaign->update([
+            'status' => 'active',
+            'sent_at' => now()
+        ]);
+        
+        // Запуск задания в очереди
+        SendEmailCampaign::dispatch($campaign);
     }
 }
