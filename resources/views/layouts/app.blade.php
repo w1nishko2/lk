@@ -40,18 +40,28 @@
                     <ul class="navbar-nav me-auto">
                         @auth
                             <li class="nav-item">
-                                <a class="nav-link" href="{{ route('site-builder.index') }}">Конструктор</a>
+                                <a class="nav-link" href="{{ route('site-builder.index') }}">
+                                    <i class="fas fa-hammer me-1"></i>
+                                    Конструктор
+                                </a>  
                             </li>
                             <li class="nav-item">
-                                <a class="nav-link" href="{{ route('site-builder.sites') }}">Мои сайты</a>
+                                <a class="nav-link" href="{{ route('site-builder.sites') }}">
+                                    <i class="fas fa-globe me-1"></i>
+                                    Мои сайты
+                                </a>
                             </li>
                             <li class="nav-item">
-                                <a class="nav-link" href="{{ route('blocks.index') }}">Управление блоками</a>
+                                <a class="nav-link" href="{{ route('blocks.index') }}">
+                                    <i class="fas fa-cubes me-1"></i>
+                                    Управление блоками
+                                </a>
                             </li>
-
-                            <!-- Добавлено: ссылка на страницу рассылки -->
                             <li class="nav-item">
-                                <a class="nav-link" href="{{ route('email-campaign.index') }}">Рассылки</a>
+                                <a class="nav-link" href="{{ route('email-campaigns.index') }}">
+                                    <i class="fas fa-envelope-bulk me-1"></i>
+                                    Email Рассылки
+                                </a>
                             </li>
                         @endauth
                     </ul>

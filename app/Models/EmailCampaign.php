@@ -12,75 +12,68 @@ class EmailCampaign extends Model
 
     protected $fillable = [
         'name',
-        'subject', 
-        'preview_text',
-        'template_id',
-        'sender_name',
-        'sender_email',
+        'subject',
+        'content',
+        'template',
         'status',
-        'scheduled_at',
-        'started_at',
-        'completed_at',
         'total_recipients',
         'sent_count',
         'failed_count',
-        'opened_count',
-        'clicked_count',
-        'unsubscribed_count',
-        'bounce_count',
+        'delay_seconds',
+        'scheduled_at',
+        'started_at',
+        'completed_at',
         'settings'
     ];
 
     protected $casts = [
+        'settings' => 'array',
         'scheduled_at' => 'datetime',
-        'started_at' => 'datetime', 
-        'completed_at' => 'datetime',
-        'settings' => 'array'
+        'started_at' => 'datetime',
+        'completed_at' => 'datetime'
     ];
 
-    const STATUS_DRAFT = 'draft';
-    const STATUS_SCHEDULED = 'scheduled';
-    const STATUS_SENDING = 'sending';
-    const STATUS_COMPLETED = 'completed';
-    const STATUS_FAILED = 'failed';
-    const STATUS_PAUSED = 'paused';
-
-    public function logs(): HasMany
+    public function recipients(): HasMany
     {
-        return $this->hasMany(EmailLog::class, 'campaign_id');
+        return $this->hasMany(EmailRecipient::class, 'campaign_id');
     }
 
-    public function subscribers(): HasMany
+    public function pendingRecipients(): HasMany
     {
-        return $this->hasMany(EmailLog::class, 'campaign_id')
-                    ->join('email_subscribers', 'email_logs.subscriber_id', '=', 'email_subscribers.id');
+        return $this->recipients()->where('status', 'pending');
     }
 
-    public function getSuccessRateAttribute(): float
+    public function sentRecipients(): HasMany
     {
-        if ($this->total_recipients == 0) return 0;
+        return $this->recipients()->where('status', 'sent');
+    }
+
+    public function failedRecipients(): HasMany
+    {
+        return $this->recipients()->where('status', 'failed');
+    }
+
+    public function getProgressPercentageAttribute(): float
+    {
+        if ($this->total_recipients === 0) {
+            return 0;
+        }
+        
         return round(($this->sent_count / $this->total_recipients) * 100, 2);
     }
 
-    public function getOpenRateAttribute(): float
+    public function isCompleted(): bool
     {
-        if ($this->sent_count == 0) return 0;
-        return round(($this->opened_count / $this->sent_count) * 100, 2);
+        return $this->status === 'completed';
     }
 
-    public function getClickRateAttribute(): float
+    public function isSending(): bool
     {
-        if ($this->sent_count == 0) return 0;
-        return round(($this->clicked_count / $this->sent_count) * 100, 2);
+        return $this->status === 'sending';
     }
 
-    public function scopeActive($query)
+    public function canStart(): bool
     {
-        return $query->whereIn('status', [self::STATUS_SCHEDULED, self::STATUS_SENDING]);
-    }
-
-    public function scopeCompleted($query)
-    {
-        return $query->where('status', self::STATUS_COMPLETED);
+        return in_array($this->status, ['draft', 'paused']) && $this->total_recipients > 0;
     }
 }

@@ -2,11 +2,10 @@
 
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\URL;
 use App\Http\Controllers\SiteBuilderController;
 use App\Http\Controllers\BlockController;
 use App\Http\Controllers\EmailCampaignController;
-use App\Http\Controllers\EmailDashboardController;
-use App\Http\Controllers\EmailTrackingController;
 
 /*
 |--------------------------------------------------------------------------
@@ -42,33 +41,15 @@ Route::resource('blocks', BlockController::class)->middleware('auth');
 Route::get('/blocks/{block}/preview', [BlockController::class, 'preview'])->name('blocks.preview')->middleware('auth');
 Route::get('/blocks/{block}/mini-preview', [BlockController::class, 'miniPreview'])->name('blocks.mini-preview')->middleware('auth');
 
-// Маршруты для Email-кампаний и Dashboard
-Route::middleware(['auth'])->group(function () {
-    // Dashboard
-    Route::get('/email/dashboard', [EmailDashboardController::class, 'index'])->name('email.dashboard');
-    Route::get('/email/dashboard/realtime', [EmailDashboardController::class, 'realtimeStats'])->name('email.dashboard.realtime');
-    
-    // Кампании
-    Route::get('/email/campaigns', [EmailCampaignController::class, 'index'])->name('email.campaigns.index');
-    Route::get('/email/campaigns/create', [EmailCampaignController::class, 'create'])->name('email.campaigns.create');
-    Route::post('/email/campaigns', [EmailCampaignController::class, 'store'])->name('email.campaigns.store');
-    Route::get('/email/campaigns/{campaign}', [EmailDashboardController::class, 'campaignDetails'])->name('email.campaigns.show');
-    Route::post('/email/campaigns/{campaign}/pause', [EmailDashboardController::class, 'pauseCampaign'])->name('email.campaigns.pause');
-    Route::post('/email/campaigns/{campaign}/resume', [EmailDashboardController::class, 'resumeCampaign'])->name('email.campaigns.resume');
-    Route::get('/email/campaigns/{campaign}/export', [EmailDashboardController::class, 'exportCampaign'])->name('email.campaigns.export');
-    
-    // Старые роуты для обратной совместимости
-    Route::get('/email-campaign', [EmailCampaignController::class, 'index'])->name('email-campaign.index');
-    Route::post('/email-campaign/send', [EmailCampaignController::class, 'send'])->name('email-campaign.send');
-    Route::get('/email-campaign/preview', [EmailCampaignController::class, 'preview'])->name('email-campaign.preview');
-});
-
-// Публичные роуты для отслеживания (без middleware auth)
-Route::group(['prefix' => 'email'], function () {
-    Route::get('/track/open/{trackingId}', [EmailTrackingController::class, 'trackOpen'])->name('email.track.open');
-    Route::get('/track/click/{trackingId}', [EmailTrackingController::class, 'trackClick'])->name('email.track.click');
-    Route::get('/unsubscribe/{trackingId}', [EmailTrackingController::class, 'unsubscribe'])->name('email.unsubscribe');
-    Route::post('/unsubscribe/{trackingId}', [EmailTrackingController::class, 'unsubscribe']);
+// Маршруты email рассылок (только для авторизованных пользователей)
+Route::prefix('email-campaigns')->name('email-campaigns.')->middleware('auth')->group(function () {
+    Route::get('/', [EmailCampaignController::class, 'index'])->name('index');
+    Route::get('/create', [EmailCampaignController::class, 'create'])->name('create');
+    Route::post('/', [EmailCampaignController::class, 'store'])->name('store');
+    Route::get('/{emailCampaign}', [EmailCampaignController::class, 'show'])->name('show');
+    Route::post('/{emailCampaign}/start', [EmailCampaignController::class, 'start'])->name('start');
+    Route::post('/{emailCampaign}/pause', [EmailCampaignController::class, 'pause'])->name('pause');
+    Route::get('/{emailCampaign}/preview', [EmailCampaignController::class, 'preview'])->name('preview');
 });
 
 Auth::routes();

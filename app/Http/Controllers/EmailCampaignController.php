@@ -3,127 +3,166 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
+use Illuminate\View\View;
+use Illuminate\Http\RedirectResponse;
+use App\Models\EmailCampaign;
+use App\Models\EmailRecipient;
+use App\Services\EmailService;
 use Illuminate\Support\Facades\Storage;
-use App\Jobs\SendCampaignEmailLegacy;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 
 class EmailCampaignController extends Controller
 {
-    public function index()
+    protected EmailService $emailService;
+
+    public function __construct(EmailService $emailService)
     {
-        // Сканируем папку для файлов базы (txt)
-        $baseDir = base_path('baseemail'); // C:\OSPanel\domains\konstructor\baseemail
-        $serverFiles = [];
-
-        if (is_dir($baseDir)) {
-            $files = scandir($baseDir);
-            foreach ($files as $f) {
-                if (in_array($f, ['.', '..'])) continue;
-                $ext = pathinfo($f, PATHINFO_EXTENSION);
-                if (in_array(mb_strtolower($ext), ['txt', 'csv'])) {
-                    $serverFiles[] = $f;
-                }
-            }
-        }
-
-        return view('email-campaign.index', [
-            'serverFiles' => $serverFiles,
-        ]);
+        $this->emailService = $emailService;
     }
 
-    public function preview(Request $request)
+    public function index(): View
     {
-        // демонстрация письма в браузере
-        $data = [
-            'subject' => $request->get('subject', 'Создайте сайт, который продаёт — консультация'),
-            'preview_text' => $request->get('preview_text', 'Короткое описание письма'),
-            'content' => '<p>Это пример контента письма. Проверка предпросмотра и preheader.</p>',
-            'unsubscribeUrl' => url('/unsubscribe')
-        ];
-        return view('email-campaign.preview', $data);
+        $campaigns = EmailCampaign::orderBy('created_at', 'desc')->paginate(10);
+        
+        return view('email-campaigns.index', compact('campaigns'));
     }
 
-    public function send(Request $request)
+    public function create(): View
     {
-        $request->validate([
+        $templates = $this->getEmailTemplates();
+        
+        return view('email-campaigns.create', compact('templates'));
+    }
+
+    public function store(Request $request): RedirectResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'name' => 'required|string|max:255',
             'subject' => 'required|string|max:255',
-            'preview_text' => 'nullable|string|max:500',
-            // file - optional if server_file provided
-            'file' => 'nullable|file|mimes:csv,txt|max:5120',
-            'server_file' => 'nullable|string',
+            'content' => 'required|string',
+            'template' => 'required|string',
+            'delay_seconds' => 'required|integer|min:10|max:3600',
+            'recipients_file' => 'required|file|mimes:txt|max:10240'
         ]);
 
-        $subject = $request->input('subject');
-        $previewText = $request->input('preview_text', '');
-
-        $emails = [];
-
-        // Если выбран серверный файл — приоритет
-        $serverFile = $request->input('server_file');
-        if ($serverFile) {
-            $baseDir = base_path('baseemail');
-            $fullPath = $baseDir . DIRECTORY_SEPARATOR . basename($serverFile);
-            if (!is_file($fullPath) || !is_readable($fullPath)) {
-                return redirect()->back()->with('error', 'Выбранный файл не найден или недоступен на сервере.');
-            }
-            // читаем построчно (txt) и парсим возможные CSV-строки
-            $lines = file($fullPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-            foreach ($lines as $line) {
-                // если CSV — возьмём первое поле, иначе строка сама по себе
-                $cols = str_getcsv($line);
-                $raw = trim($cols[0] ?? $line);
-                if ($raw && filter_var($raw, FILTER_VALIDATE_EMAIL)) {
-                    $emails[] = mb_strtolower($raw);
-                }
-            }
-        } elseif ($request->hasFile('file')) {
-            $path = $request->file('file')->store('email_campaigns');
-            $fullPath = storage_path('app/' . $path);
-
-            if (($handle = fopen($fullPath, 'r')) !== false) {
-                $header = fgetcsv($handle);
-                $emailIndex = null;
-                if ($header) {
-                    foreach ($header as $i => $h) {
-                        if (mb_strtolower(trim($h)) === 'email') {
-                            $emailIndex = $i;
-                            break;
-                        }
-                    }
-                }
-                if ($emailIndex === null) {
-                    rewind($handle);
-                }
-
-                while (($row = fgetcsv($handle)) !== false) {
-                    $raw = $emailIndex !== null ? ($row[$emailIndex] ?? '') : ($row[0] ?? '');
-                    $email = trim($raw);
-                    if ($email && filter_var($email, FILTER_VALIDATE_EMAIL)) {
-                        $emails[] = mb_strtolower($email);
-                    }
-                }
-                fclose($handle);
-            }
-        } else {
-            return redirect()->back()->with('error', 'Нужно загрузить файл или выбрать серверный файл.');
+        if ($validator->fails()) {
+            return back()->withErrors($validator)->withInput();
         }
 
-        $emails = array_values(array_unique($emails));
-        $total = count($emails);
-        if ($total === 0) {
-            return redirect()->back()->with('error', 'В файле не найдено корректных email адресов.');
+        $campaign = EmailCampaign::create([
+            'name' => $request->name,
+            'subject' => $request->subject,
+            'content' => $request->content,
+            'template' => $request->template,
+            'delay_seconds' => $request->delay_seconds,
+            'settings' => [
+                'from_name' => $request->from_name ?? 'Конструктор Сайтов',
+                'from_email' => 'email@weebs.ru'
+            ]
+        ]);
+
+        // Обработка файла с получателями
+        $this->processRecipientsFile($campaign, $request->file('recipients_file'));
+
+        return redirect()->route('email-campaigns.show', $campaign)
+                        ->with('success', 'Кампания создана успешно');
+    }
+
+    public function show(EmailCampaign $emailCampaign): View
+    {
+        $emailCampaign->load(['recipients' => function ($query) {
+            $query->orderBy('created_at', 'desc');
+        }]);
+
+        $stats = [
+            'total' => $emailCampaign->total_recipients,
+            'sent' => $emailCampaign->sent_count,
+            'failed' => $emailCampaign->failed_count,
+            'pending' => $emailCampaign->total_recipients - $emailCampaign->sent_count - $emailCampaign->failed_count
+        ];
+
+        return view('email-campaigns.show', compact('emailCampaign', 'stats'));
+    }
+
+    public function start(EmailCampaign $emailCampaign): JsonResponse
+    {
+        if (!$emailCampaign->canStart()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Кампания не может быть запущена'
+            ]);
         }
 
-        // разбиваем на чанки и диспатчим джобы с маленькой задержкой между батчами
-        $chunkSize = 50; // при необходимости уменьшите
-        $chunks = array_chunk($emails, $chunkSize);
+        $emailCampaign->update([
+            'status' => 'sending',
+            'started_at' => now()
+        ]);
 
-        foreach ($chunks as $i => $chunk) {
-            $delaySeconds = $i * 5;
-            SendCampaignEmailLegacy::dispatch($chunk, $subject, $previewText)
-                ->delay(now()->addSeconds($delaySeconds));
+        // Запуск в фоне
+        $this->emailService->startCampaign($emailCampaign);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Рассылка запущена'
+        ]);
+    }
+
+    public function pause(EmailCampaign $emailCampaign): JsonResponse
+    {
+        $emailCampaign->update(['status' => 'paused']);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Рассылка приостановлена'
+        ]);
+    }
+
+    public function preview(EmailCampaign $emailCampaign): View
+    {
+        $content = $this->emailService->renderEmail($emailCampaign, [
+            'name' => 'Имя Получателя',
+            'email' => 'example@example.com'
+        ]);
+
+        return view('email-campaigns.preview', compact('emailCampaign', 'content'));
+    }
+
+    private function processRecipientsFile(EmailCampaign $campaign, $file): void
+    {
+        $content = file_get_contents($file->getRealPath());
+        $emails = array_filter(array_map('trim', explode("\n", $content)));
+        
+        $validEmails = [];
+        foreach ($emails as $email) {
+            if (filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                $validEmails[] = [
+                    'campaign_id' => $campaign->id,
+                    'email' => $email,
+                    'created_at' => now(),
+                    'updated_at' => now()
+                ];
+            }
         }
 
-        $batches = count($chunks);
-        return redirect()->back()->with('success', "Запущена рассылка для {$total} получателей ({$batches} батчей). Запустите воркер: php artisan queue:work");
+        if (!empty($validEmails)) {
+            // Разбиваем на чанки для избежания превышения лимитов памяти
+            $chunks = array_chunk($validEmails, 1000);
+            foreach ($chunks as $chunk) {
+                EmailRecipient::insert($chunk);
+            }
+            
+            $campaign->update(['total_recipients' => count($validEmails)]);
+        }
+    }
+
+    private function getEmailTemplates(): array
+    {
+        return [
+            'sales' => 'Продающий шаблон',
+            'informational' => 'Информационный шаблон',
+            'promotional' => 'Рекламный шаблон'
+        ];
     }
 }
